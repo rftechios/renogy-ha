@@ -185,7 +185,11 @@ PV_SENSORS: tuple[RenogyBLESensorDescription, ...] = (
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: data.get(KEY_POWER_GENERATION_TOTAL) / 1000,
+        value_fn=lambda data: (
+            None
+            if data.get(KEY_POWER_GENERATION_TOTAL) is None
+            else data.get(KEY_POWER_GENERATION_TOTAL) / 1000
+        ),
     ),
 )
 
