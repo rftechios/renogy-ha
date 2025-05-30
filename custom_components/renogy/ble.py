@@ -240,6 +240,19 @@ class RenogyBLEDevice:
                 return False
 
             # Basic validation of Modbus response
+            # Ensure the complete Modbus frame is present: 3‑byte header + data + 2‑byte CRC
+            byte_count = raw_data[2]
+            expected_len = 3 + byte_count + 2
+            if len(raw_data) < expected_len:
+                LOGGER.warning(
+                    "Got only %s / %s bytes for %s (register %s). Raw: %s",
+                    len(raw_data),
+                    expected_len,
+                    cmd_name,
+                    register,
+                    raw_data.hex(),
+                )
+                return False
             function_code = raw_data[1] if len(raw_data) > 1 else 0
             if function_code & 0x80:  # Error response
                 error_code = raw_data[2] if len(raw_data) > 2 else 0
@@ -614,24 +627,38 @@ class RenogyActiveBluetoothCoordinator(ActiveBluetoothDataUpdateCoordinator):
                                 RENOGY_WRITE_CHAR_UUID, modbus_request
                             )
 
+                            # Expected length: 3 header bytes + 2*word_count data + 2‑byte CRC
+                            word_count = cmd[2]
+                            expected_len = 3 + word_count * 2 + 2
+                            start_time = self.hass.loop.time()
+
                             try:
-                                await asyncio.wait_for(
-                                    notification_event.wait(),
-                                    MAX_NOTIFICATION_WAIT_TIME,
-                                )
+                                while len(notification_data) < expected_len:
+                                    remaining = MAX_NOTIFICATION_WAIT_TIME - (
+                                        self.hass.loop.time() - start_time
+                                    )
+                                    if remaining <= 0:
+                                        raise asyncio.TimeoutError()
+                                    await asyncio.wait_for(
+                                        notification_event.wait(), remaining
+                                    )
+                                    notification_event.clear()
                             except asyncio.TimeoutError:
                                 self.logger.info(
-                                    "Timeout waiting for %s data from device %s",
+                                    "Timeout – only %s / %s bytes received for %s from device %s",
+                                    len(notification_data),
+                                    expected_len,
                                     cmd_name,
                                     device.name,
                                 )
                                 continue
 
-                            result_data = bytes(notification_data)
+                            result_data = bytes(notification_data[:expected_len])
                             self.logger.debug(
-                                "Received %s data length: %s",
+                                "Received %s data length: %s (expected %s)",
                                 cmd_name,
                                 len(result_data),
+                                expected_len,
                             )
 
                             cmd_success = device.update_parsed_data(
