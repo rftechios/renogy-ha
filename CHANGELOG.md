@@ -1,6 +1,27 @@
 # CHANGELOG
 
 
+## v0.2.9 (2025-05-30)
+
+### Bug Fixes
+
+- Aggregate full Modbus frame before parsing
+  ([`59cf4b6`](https://github.com/IAmTheMitchell/renogy-ha/commit/59cf4b68b3aca2916d01c5ac429ad180e5cf7e40))
+
+- Report none when missing data for Power Generation Total sensor
+  ([`2520523`](https://github.com/IAmTheMitchell/renogy-ha/commit/252052342cf57eb352e3c80caa000ecc6662ddcd))
+
+### Build System
+
+- Upgrade homeassistant dependency
+  ([`94fec88`](https://github.com/IAmTheMitchell/renogy-ha/commit/94fec88957aa0966ca24fc451189f21ea14ac6ca))
+
+### Chores
+
+- Add repomix-output.xml to .gitignore
+  ([`6a91c13`](https://github.com/IAmTheMitchell/renogy-ha/commit/6a91c132981ddaa110db0c96380ea9f7b71f82e6))
+
+
 ## v0.2.8 (2025-04-29)
 
 ### Bug Fixes
