@@ -303,6 +303,49 @@ class RenogyBLEDevice:
             )
             return False
 
+    async def async_set_load(self, turn_on: bool) -> bool:
+        """
+        Toggle the load output ON or OFF for Renogy Wanderer 10A.
+
+        Args:
+            turn_on (bool): True to turn ON, False to turn OFF.
+
+        Returns:
+            bool: True if successful, False otherwise.
+        """
+        from bleak_retry_connector import establish_connection, BleakClientWithServiceCache
+
+        # Modbus write single register: function code 0x06, register 0x0002
+        device_id = DEFAULT_DEVICE_ID
+        function_code = 0x06
+        register = 0x0002
+        value = 0x0001 if turn_on else 0x0000
+
+        frame = bytearray([
+            device_id,
+            function_code,
+            (register >> 8) & 0xFF,
+            register & 0xFF,
+            (value >> 8) & 0xFF,
+            value & 0xFF,
+        ])
+        crc_low, crc_high = modbus_crc(frame)
+        frame.extend([crc_low, crc_high])
+
+        try:
+            client = await establish_connection(
+                BleakClientWithServiceCache,
+                self.ble_device,
+                self.name or self.address,
+                max_attempts=3,
+            )
+            await client.write_gatt_char(RENOGY_WRITE_CHAR_UUID, frame)
+            await client.disconnect()
+            return True
+        except Exception as e:
+            LOGGER.error("Failed to set load status: %s", str(e))
+            return False
+
 
 class RenogyActiveBluetoothCoordinator(ActiveBluetoothDataUpdateCoordinator):
     """Class to manage fetching Renogy BLE data via active connections."""
