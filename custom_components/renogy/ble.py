@@ -32,6 +32,7 @@ from .const import (
     RENOGY_READ_CHAR_UUID,
     RENOGY_WRITE_CHAR_UUID,
     UNAVAILABLE_RETRY_INTERVAL,
+    MODEL_NBR_UUID,
 )
 
 try:
@@ -313,7 +314,6 @@ class RenogyBLEDevice:
         Returns:
             bool: True if successful, False otherwise.
         """
-        from bleak_retry_connector import establish_connection, BleakClientWithServiceCache
 
         # Modbus write single register: function code 0x06, register 0x0002
         device_id = DEFAULT_DEVICE_ID
@@ -642,6 +642,55 @@ class RenogyActiveBluetoothCoordinator(ActiveBluetoothDataUpdateCoordinator):
                     try:
                         self.logger.debug("Connected to device %s", device.name)
 
+                        if client.is_connected:
+                            self.logger.debug(
+                                "Connected to device (second verification) %s",
+                                device.name,
+                            )
+
+                        services = client.services
+                        self.logger.debug("Available BLE services and characteristics for %s:", device.name)
+                        for service in services:
+                            self.logger.debug("Service %s", service.uuid)
+                            for char in service.characteristics:
+                                self.logger.debug("  Characteristic %s (properties: %s)", char.uuid, char.properties)
+                                
+                                try:
+                                    read_test_uuid = await client.read_gatt_char(char.uuid)
+                                    self.logger.debug(
+                                        "Read Test UUID: %s %s",
+                                        char.uuid,
+                                        "".join(map(chr, read_test_uuid)),
+                                    )
+                                except BleakError as e:
+                                    self.logger.warning(
+                                        "Could not read characteristic from device %s: uuid: %s error: %s",
+                                        device.name,
+                                        char.uuid,
+                                        str(e),
+                                    )                                
+
+                        model_number = await client.read_gatt_char(
+                            MODEL_NBR_UUID
+                        )
+
+                        #print("Model Number: {0}".format("".join(map(chr, model_number))))
+
+                        self.logger.debug(
+                            "Model Number: %s",
+                            "".join(map(chr, model_number)),
+                        )
+                        
+                        
+                        # read_test = await client.read_gatt_char(
+                        #     RENOGY_READ_CHAR_UUID
+                        # )
+
+                        # self.logger.debug(
+                        #     "Read Test: %s",
+                        #     read_test,
+                        # )                                                                        
+                        
                         # Create an event that will be set when notification data is received
                         notification_event = asyncio.Event()
                         notification_data = bytearray()
@@ -669,6 +718,9 @@ class RenogyActiveBluetoothCoordinator(ActiveBluetoothDataUpdateCoordinator):
                             await client.write_gatt_char(
                                 RENOGY_WRITE_CHAR_UUID, modbus_request
                             )
+
+                            #Sleep for 15 seconds to allow device to respond
+                            #await asyncio.sleep(15) 
 
                             # Expected length: 3 header bytes + 2*word_count data + 2‑byte CRC
                             word_count = cmd[2]

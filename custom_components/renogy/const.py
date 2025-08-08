@@ -45,11 +45,13 @@ RENOGY_WRITE_CHAR_UUID = (
     "0000ffd1-0000-1000-8000-00805f9b34fb"  # Characteristic for writing commands
 )
 
+MODEL_NBR_UUID = "2A24"
+
 # Time in minutes to wait before attempting to reconnect to unavailable devices
 UNAVAILABLE_RETRY_INTERVAL = 10
 
 # Maximum time to wait for a notification response (seconds)
-MAX_NOTIFICATION_WAIT_TIME = 2.0
+MAX_NOTIFICATION_WAIT_TIME = 7.0 #Originally 1.0, increased to 2.0 for reliability
 
 # Default device ID for Renogy devices
 DEFAULT_DEVICE_ID = 0xFF
