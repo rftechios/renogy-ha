@@ -333,17 +333,38 @@ class RenogyBLEDevice:
         frame.extend([crc_low, crc_high])
 
         try:
+            LOGGER.info("Setting load status to %s for device %s", "ON" if turn_on else "OFF", self.name)
+            LOGGER.debug("Sending Modbus frame: %s", frame.hex())
+            
             client = await establish_connection(
                 BleakClientWithServiceCache,
                 self.ble_device,
                 self.name or self.address,
                 max_attempts=3,
             )
+            
+            # Write the command
             await client.write_gatt_char(RENOGY_WRITE_CHAR_UUID, frame)
+            LOGGER.debug("Command sent successfully")
+            
+            # Give the device some time to process the command
+            await asyncio.sleep(1.0)
+            
+            # Optionally, we could read back the register to confirm the change
+            # But for now, just trust that the write was successful
+            
             await client.disconnect()
+            LOGGER.info("Load control command completed successfully")
             return True
+            
+        except BleakError as e:
+            LOGGER.error("BLE error while setting load status for %s: %s", self.name, str(e))
+            self.update_availability(False, e)
+            return False
         except Exception as e:
-            LOGGER.error("Failed to set load status: %s", str(e))
+            LOGGER.error("Unexpected error while setting load status for %s: %s", self.name, str(e))
+            LOGGER.debug("Exception details: %s", traceback.format_exc())
+            self.update_availability(False, e)
             return False
 
 

@@ -1,7 +1,9 @@
 """Switch entity for Renogy BLE load control."""
 
+import asyncio
+
 from homeassistant.components.switch import SwitchEntity
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import EntityCategory
 
 from .ble import RenogyActiveBluetoothCoordinator, RenogyBLEDevice
@@ -26,7 +28,7 @@ class RenogyLoadSwitch(SwitchEntity):
         device_address = getattr(device, "address", "unknown")
         self._attr_name = f"{device_name} Load Switch"
         self._attr_unique_id = f"{device_address}_load_status"
-        self._attr_is_on = False
+        # Don't set _attr_is_on here since we override the is_on property
         self._attr_device_info = {
             "identifiers": {(DOMAIN, device_address)},
             "name": device_name,
@@ -34,35 +36,61 @@ class RenogyLoadSwitch(SwitchEntity):
             "model": getattr(device, "model", "Unknown"),
         }
 
+    async def async_added_to_hass(self):
+        """Subscribe to coordinator updates when added to hass."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            self.coordinator.async_add_listener(self.async_write_ha_state)
+        )
+
+    @property
+    def available(self) -> bool:
+        """Return if entity is available."""
+        return self.coordinator.last_update_success
+
     @property
     def is_on(self) -> bool:
         """Return True if load is ON."""
         device = self.coordinator.device
         if device and device.parsed_data:
-            return bool(device.parsed_data.get("load_status", False))
-        return self._attr_is_on
+            load_status = device.parsed_data.get("load_status")
+            return load_status == "on"
+        return False
 
     async def async_turn_on(self, **kwargs):
         """Turn the load ON."""
+        LOGGER.info("User requested to turn load ON for device %s", self.coordinator.device.name)
         device = self.coordinator.device
-        if device:
-            success = await device.async_set_load(True)
-            if success:
-                self._attr_is_on = True
-                await self.coordinator.async_request_refresh()
-                self.async_write_ha_state()
+        if not device:
+            LOGGER.error("No device available for load control")
+            return
+            
+        success = await device.async_set_load(True)
+        LOGGER.info("Load turn ON command result: %s", success)
+        
+        if success:
+            # Give device time to process the command before refreshing
+            await asyncio.sleep(1.0)
+            await self.coordinator.async_request_refresh()
+            self.async_write_ha_state()
+        else:
+            LOGGER.error("Failed to turn load ON for device %s", device.name)
 
     async def async_turn_off(self, **kwargs):
         """Turn the load OFF."""
+        LOGGER.info("User requested to turn load OFF for device %s", self.coordinator.device.name)
         device = self.coordinator.device
-        if device:
-            success = await device.async_set_load(False)
-            if success:
-                self._attr_is_on = False
-                await self.coordinator.async_request_refresh()
-                self.async_write_ha_state()
-
-    async def async_update(self):
-        """Update the switch state."""
-        await self.coordinator.async_request_refresh()
-        self._attr_is_on = self.is_on
+        if not device:
+            LOGGER.error("No device available for load control")
+            return
+            
+        success = await device.async_set_load(False)
+        LOGGER.info("Load turn OFF command result: %s", success)
+        
+        if success:
+            # Give device time to process the command before refreshing
+            await asyncio.sleep(1.0)
+            await self.coordinator.async_request_refresh()
+            self.async_write_ha_state()
+        else:
+            LOGGER.error("Failed to turn load OFF for device %s", device.name)
