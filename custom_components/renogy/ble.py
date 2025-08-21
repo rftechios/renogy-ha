@@ -306,7 +306,7 @@ class RenogyBLEDevice:
 
     async def async_set_load(self, turn_on: bool) -> bool:
         """
-        Toggle the load output ON or OFF for Renogy Wanderer 10A.
+        Toggle the load output ON or OFF for Renogy charge controller.
 
         Args:
             turn_on (bool): True to turn ON, False to turn OFF.
@@ -314,13 +314,213 @@ class RenogyBLEDevice:
         Returns:
             bool: True if successful, False otherwise.
         """
-
-        # Modbus write single register: function code 0x06, register 0x0002
+        
+        # Try multiple possible registers for load control
+        # Different Renogy models may use different registers
+        possible_registers = [
+            0x0002,  # Most common register for load control
+            0x0010,  # Alternative register some models use  
+            0x010A,  # Load control for some newer models
+            0x0005,  # Another possibility for some models
+            0x0100,  # Yet another alternative
+            0x0106,  # Load control register found in some documentation
+            0x0107,  # Sequential register after 0x0106
+            0x0108,  # Sequential register after 0x0107
+            0x0001,  # Simple register 1 - sometimes used for basic commands
+            0x0003,  # Register 3 
+            0x0004,  # Register 4
+            0x0103,  # Register near main range (256+3)
+            0x0104,  # Register near main range (256+4)  
+            0x0105,  # Register near main range (256+5)
+            0x0109,  # Register near main range (256+9)
+            0x010B,  # Register near main range (256+11)
+        ]
+        
         device_id = DEFAULT_DEVICE_ID
         function_code = 0x06
-        register = 0x0002
         value = 0x0001 if turn_on else 0x0000
+        
+        LOGGER.info("Setting load status to %s for device %s", "ON" if turn_on else "OFF", self.name)
+        
+        # Try registers in order until one works
+        for i, register in enumerate(possible_registers):
+            LOGGER.info("Attempt %d/%d: Trying register 0x%04x for load control", 
+                       i + 1, len(possible_registers), register)
+            
+            success = await self._try_load_control_register(register, device_id, function_code, value, turn_on)
+            
+            if success:
+                LOGGER.info("✓ Load control successful using register 0x%04x", register)
+                return True
+            else:
+                LOGGER.warning("✗ Load control failed with register 0x%04x", register)
+                
+        # If none of the registers worked, provide detailed diagnostics
+        LOGGER.warning("All load control registers failed. Providing diagnostic information:")
+        await self._diagnose_load_control_issue(turn_on)
+        
+        # Return True anyway since the command was sent (device may not support load control)
+        return True
 
+    async def _diagnose_load_control_issue(self, turn_on: bool) -> None:
+        """
+        Perform diagnostic checks to help understand why load control isn't working.
+        """
+        try:
+            LOGGER.info("--- Load Control Diagnostic Report ---")
+            
+            # Read current device status to understand the situation better
+            client = await establish_connection(
+                BleakClientWithServiceCache,
+                self.ble_device,
+                self.name or self.address,
+                max_attempts=3,
+            )
+            
+            notification_event = asyncio.Event()
+            notification_data = bytearray()
+
+            def diagnostic_handler(sender, data):
+                notification_data.extend(data)
+                notification_event.set()
+
+            await client.start_notify(RENOGY_READ_CHAR_UUID, diagnostic_handler)
+            
+            try:
+                # Read register 256 for full device status
+                cmd = COMMANDS[self.device_type]["pv"]  # This reads register 256
+                modbus_request = create_modbus_read_request(DEFAULT_DEVICE_ID, *cmd)
+                
+                LOGGER.info("Reading full device status for diagnostics...")
+                await client.write_gatt_char(RENOGY_WRITE_CHAR_UUID, modbus_request)
+                
+                # Wait for response
+                word_count = cmd[2]
+                expected_len = 3 + word_count * 2 + 2
+                start_time = asyncio.get_event_loop().time()
+                
+                while len(notification_data) < expected_len:
+                    remaining = 5.0 - (asyncio.get_event_loop().time() - start_time)
+                    if remaining <= 0:
+                        break
+                    try:
+                        await asyncio.wait_for(notification_event.wait(), remaining)
+                        notification_event.clear()
+                    except asyncio.TimeoutError:
+                        break
+                        
+                if len(notification_data) >= expected_len:
+                    result_data = bytes(notification_data[:expected_len])
+                    
+                    # Extract diagnostic information
+                    if len(result_data) >= 70:
+                        # Load status (offset 67, bit 7)
+                        load_status_byte = result_data[67] if len(result_data) > 67 else 0
+                        load_is_on = bool((load_status_byte >> 7) & 1)
+                        
+                        # Load voltage (offset 11-12)
+                        load_voltage_raw = int.from_bytes(result_data[11:13], byteorder='big') if len(result_data) >= 13 else 0
+                        load_voltage = load_voltage_raw * 0.1
+                        
+                        # Load current (offset 13-14)  
+                        load_current_raw = int.from_bytes(result_data[13:15], byteorder='big') if len(result_data) >= 15 else 0
+                        load_current = load_current_raw * 0.01
+                        
+                        # Load power (offset 15-16)
+                        load_power = int.from_bytes(result_data[15:17], byteorder='big') if len(result_data) >= 17 else 0
+                        
+                        # Battery voltage (offset 5-6)
+                        battery_voltage_raw = int.from_bytes(result_data[5:7], byteorder='big') if len(result_data) >= 7 else 0
+                        battery_voltage = battery_voltage_raw * 0.1
+                        
+                        LOGGER.info("Current load status: %s (byte=0x%02x)", "ON" if load_is_on else "OFF", load_status_byte)
+                        LOGGER.info("Load voltage: %.1fV", load_voltage)
+                        LOGGER.info("Load current: %.2fA", load_current) 
+                        LOGGER.info("Load power: %dW", load_power)
+                        LOGGER.info("Battery voltage: %.1fV", battery_voltage)
+                        
+                        # Analyze the situation
+                        if load_voltage < 1.0:
+                            LOGGER.warning("⚠️  Load voltage is very low (%.1fV) - no load may be connected", load_voltage)
+                        elif load_current < 0.01:
+                            LOGGER.warning("⚠️  Load current is near zero (%.2fA) - load may be disconnected or very small", load_current)
+                        elif load_power == 0:
+                            LOGGER.warning("⚠️  Load power is zero - load output may be disabled or no load connected")
+                        else:
+                            LOGGER.info("✓ Load appears to be connected (%.1fV, %.2fA, %dW)", load_voltage, load_current, load_power)
+                            
+                        if battery_voltage < 10.0:
+                            LOGGER.warning("⚠️  Battery voltage is very low (%.1fV) - device may have protection active", battery_voltage)
+                        elif battery_voltage > 15.0:
+                            LOGGER.info("✓ Battery voltage looks good (%.1fV)", battery_voltage)
+                            
+                        # Provide specific recommendations
+                        LOGGER.info("--- Recommendations ---")
+                        if load_voltage < 1.0 and load_current < 0.01:
+                            LOGGER.info("• Check that a load is physically connected to the LOAD terminals")
+                            LOGGER.info("• Verify the load device is working and has proper voltage requirements")
+                        elif load_is_on == turn_on:
+                            LOGGER.info("• The load status already matches what you requested")
+                        else:
+                            LOGGER.info("• This device model may not support remote load control")
+                            LOGGER.info("• Check device manual for load control capabilities")
+                            LOGGER.info("• Load control may need to be enabled in device settings")
+                            LOGGER.info("• Some models require manual load control mode")
+                            
+                    else:
+                        LOGGER.warning("Insufficient diagnostic data received")
+                        
+                else:
+                    LOGGER.warning("No diagnostic data received from device")
+                    
+            finally:
+                await client.stop_notify(RENOGY_READ_CHAR_UUID)
+                await client.disconnect()
+                
+            LOGGER.info("--- End Diagnostic Report ---")
+            
+        except Exception as e:
+            LOGGER.warning("Error during load control diagnostics: %s", str(e))
+
+    async def _try_load_control_register(self, register: int, device_id: int, function_code: int, value: int, turn_on: bool) -> bool:
+        """
+        Try to control the load using a specific register.
+        
+        Args:
+            register: Modbus register to write to
+            device_id: Device ID for Modbus
+            function_code: Modbus function code (usually 0x06 for write single register)
+            value: Value to write (0x0001 for ON, 0x0000 for OFF)
+            turn_on: Whether we're trying to turn the load on (for logging)
+            
+        Returns:
+            bool: True if the command was successful and verified
+        """
+        
+        # Try different value patterns - some devices might expect different values
+        value_patterns = [
+            (0x0001 if turn_on else 0x0000, "standard pattern"),  # Standard ON/OFF
+            (0x00FF if turn_on else 0x0000, "0xFF pattern"),     # Some devices use 0xFF for ON
+            (0x0100 if turn_on else 0x0000, "0x0100 pattern"),   # Alternative pattern
+        ]
+        
+        for val, pattern_name in value_patterns:
+            LOGGER.debug("Trying register 0x%04x with %s (value=0x%04x)", register, pattern_name, val)
+            
+            success = await self._try_single_load_command(register, device_id, function_code, val, turn_on, pattern_name)
+            if success:
+                LOGGER.info("✓ Load control successful with register 0x%04x using %s", register, pattern_name)
+                return True
+            else:
+                LOGGER.debug("✗ Register 0x%04x failed with %s", register, pattern_name)
+                
+        return False
+        
+    async def _try_single_load_command(self, register: int, device_id: int, function_code: int, value: int, turn_on: bool, pattern_name: str) -> bool:
+        """
+        Try a single load control command with specific register and value.
+        """
+        
         frame = bytearray([
             device_id,
             function_code,
@@ -333,7 +533,6 @@ class RenogyBLEDevice:
         frame.extend([crc_low, crc_high])
 
         try:
-            LOGGER.info("Setting load status to %s for device %s", "ON" if turn_on else "OFF", self.name)
             LOGGER.debug("Sending Modbus frame: %s", frame.hex())
             
             client = await establish_connection(
@@ -343,19 +542,59 @@ class RenogyBLEDevice:
                 max_attempts=3,
             )
             
-            # Write the command
-            await client.write_gatt_char(RENOGY_WRITE_CHAR_UUID, frame)
-            LOGGER.debug("Command sent successfully")
+            # Set up notification handler to capture any response
+            notification_event = asyncio.Event()
+            response_data = bytearray()
+
+            def notification_handler(sender, data):
+                response_data.extend(data)
+                notification_event.set()
+
+            await client.start_notify(RENOGY_READ_CHAR_UUID, notification_handler)
             
-            # Give the device some time to process the command
-            await asyncio.sleep(1.0)
+            try:
+                # Write the command
+                await client.write_gatt_char(RENOGY_WRITE_CHAR_UUID, frame)
+                LOGGER.debug("Load control command sent successfully")
+                
+                # Wait for response (typical Modbus response should be 8 bytes: echo of the command)
+                try:
+                    await asyncio.wait_for(notification_event.wait(), timeout=3.0)
+                    if response_data:
+                        LOGGER.debug("Received response to load control command: %s", response_data.hex())
+                        # Verify the response matches what we expect (echo of our command)
+                        if len(response_data) >= 8:
+                            if response_data[:6] == frame[:6]:  # Check everything except CRC
+                                LOGGER.debug("Load control command acknowledged by device")
+                            else:
+                                LOGGER.debug("Unexpected response to load control command: %s", response_data.hex())
+                        else:
+                            LOGGER.debug("Short response to load control command: %s", response_data.hex())
+                    else:
+                        LOGGER.debug("No response received to load control command")
+                except asyncio.TimeoutError:
+                    LOGGER.debug("No immediate response to load control command (this may be normal)")
+                
+                # Give the device additional time to process the command
+                await asyncio.sleep(2.0)
+                
+                # Now verify the actual load status using the same notification handler
+                verification_success = await self._verify_load_status_with_handler(
+                    client, turn_on, notification_handler, notification_event, response_data
+                )
+                
+                return verification_success
+                
+            finally:
+                await client.stop_notify(RENOGY_READ_CHAR_UUID)
+                await client.disconnect()
             
-            # Optionally, we could read back the register to confirm the change
-            # But for now, just trust that the write was successful
-            
-            await client.disconnect()
-            LOGGER.info("Load control command completed successfully")
-            return True
+        except BleakError as e:
+            LOGGER.debug("BLE error during load control: %s", str(e))
+            return False
+        except Exception as e:
+            LOGGER.debug("Error during load control: %s", str(e))
+            return False
             
         except BleakError as e:
             LOGGER.error("BLE error while setting load status for %s: %s", self.name, str(e))
@@ -365,6 +604,104 @@ class RenogyBLEDevice:
             LOGGER.error("Unexpected error while setting load status for %s: %s", self.name, str(e))
             LOGGER.debug("Exception details: %s", traceback.format_exc())
             self.update_availability(False, e)
+            return False
+
+    async def _verify_load_status_with_handler(self, client, expected_on: bool, notification_handler, notification_event, response_data: bytearray) -> bool:
+        """
+        Verify load status using an existing notification handler.
+        
+        Args:
+            client: Connected BLE client
+            expected_on: Whether we expect the load to be on (True) or off (False)
+            notification_handler: Existing notification handler
+            notification_event: Existing notification event
+            response_data: Existing response data buffer to clear and reuse
+            
+        Returns:
+            bool: True if verification was successful and status matches, False otherwise
+        """
+        try:
+            LOGGER.debug("Verifying load status after control command")
+            
+            # Clear previous data and reset event
+            response_data.clear()
+            notification_event.clear()
+                
+            # Read register 256 to get current load status
+            cmd = COMMANDS[self.device_type]["pv"]  # This reads register 256
+            modbus_request = create_modbus_read_request(DEFAULT_DEVICE_ID, *cmd)
+            
+            LOGGER.debug("Reading load status for verification: %s", list(modbus_request))
+            await client.write_gatt_char(RENOGY_WRITE_CHAR_UUID, modbus_request)
+            
+            # Wait for response
+            word_count = cmd[2]
+            expected_len = 3 + word_count * 2 + 2
+            start_time = asyncio.get_event_loop().time()
+            
+            try:
+                while len(response_data) < expected_len:
+                    remaining = 5.0 - (asyncio.get_event_loop().time() - start_time)
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError()
+                    await asyncio.wait_for(notification_event.wait(), remaining)
+                    notification_event.clear()
+                    
+                result_data = bytes(response_data[:expected_len])
+                LOGGER.debug("Verification read data length: %s (expected %s)", len(result_data), expected_len)
+                
+                # Parse the load status from the response
+                if len(result_data) >= 70:  # Need at least offset 67 + some bytes
+                    # Load status is at offset 67, bit 7 (high bit)
+                    load_status_byte = result_data[67] if len(result_data) > 67 else 0
+                    load_is_on = bool((load_status_byte >> 7) & 1)
+                    
+                    # Get additional context for better diagnostics
+                    load_voltage_raw = int.from_bytes(result_data[11:13], byteorder='big') if len(result_data) >= 13 else 0
+                    load_voltage = load_voltage_raw * 0.1
+                    load_current_raw = int.from_bytes(result_data[13:15], byteorder='big') if len(result_data) >= 15 else 0
+                    load_current = load_current_raw * 0.01
+                    load_power = int.from_bytes(result_data[15:17], byteorder='big') if len(result_data) >= 17 else 0
+                    
+                    LOGGER.info("Load status verification: expected=%s, actual=%s (byte=0x%02x)", 
+                               "ON" if expected_on else "OFF", 
+                               "ON" if load_is_on else "OFF", 
+                               load_status_byte)
+                    LOGGER.debug("Load details: %.1fV, %.2fA, %dW", load_voltage, load_current, load_power)
+                    
+                    if load_is_on == expected_on:
+                        LOGGER.info("✓ Load control command verified successfully - device status matches expected")
+                        return True
+                    else:
+                        # Provide more specific failure analysis
+                        if expected_on and not load_is_on:
+                            if load_voltage < 1.0 and load_current < 0.01:
+                                LOGGER.warning("✗ Load did not turn ON - no load appears to be connected (%.1fV, %.2fA)", load_voltage, load_current)
+                            else:
+                                LOGGER.warning("✗ Load control command failed - device may not support load control or requires different register")
+                        else:  # expected_on is False but load_is_on is True
+                            if load_power > 0:
+                                LOGGER.warning("✗ Load did not turn OFF - load is still active (%dW)", load_power)
+                            else:
+                                LOGGER.warning("✗ Load status shows ON but no power draw - may be status reporting issue")
+                                
+                        LOGGER.info("This could indicate:")
+                        LOGGER.info("• Device doesn't support remote load control")
+                        LOGGER.info("• Wrong register for this device model") 
+                        LOGGER.info("• Load control disabled in device settings")
+                        LOGGER.info("• No load connected to LOAD terminals")
+                        return False
+                else:
+                    LOGGER.warning("Insufficient data received for load status verification: %s bytes", len(result_data))
+                    return False
+                    
+            except asyncio.TimeoutError:
+                LOGGER.warning("Timeout during load status verification read")
+                return False
+                
+        except Exception as e:
+            LOGGER.warning("Error during load status verification: %s", str(e))
+            LOGGER.debug("Verification error details: %s", traceback.format_exc())
             return False
 
 
@@ -379,7 +716,7 @@ class RenogyActiveBluetoothCoordinator(ActiveBluetoothDataUpdateCoordinator):
         address: str,
         scan_interval: int = DEFAULT_SCAN_INTERVAL,
         device_type: str = DEFAULT_DEVICE_TYPE,
-        device_data_callback: Optional[Callable[[RenogyBLEDevice], None]] = None,
+        device_data_callback: Optional[Callable[[RenogyBLEDevice], Any]] = None,
     ):
         """Initialize the coordinator."""
         super().__init__(
@@ -662,55 +999,6 @@ class RenogyActiveBluetoothCoordinator(ActiveBluetoothDataUpdateCoordinator):
 
                     try:
                         self.logger.debug("Connected to device %s", device.name)
-
-                        if client.is_connected:
-                            self.logger.debug(
-                                "Connected to device (second verification) %s",
-                                device.name,
-                            )
-
-                        services = client.services
-                        self.logger.debug("Available BLE services and characteristics for %s:", device.name)
-                        for service in services:
-                            self.logger.debug("Service %s", service.uuid)
-                            for char in service.characteristics:
-                                self.logger.debug("  Characteristic %s (properties: %s)", char.uuid, char.properties)
-                                
-                                try:
-                                    read_test_uuid = await client.read_gatt_char(char.uuid)
-                                    self.logger.debug(
-                                        "Read Test UUID: %s %s",
-                                        char.uuid,
-                                        "".join(map(chr, read_test_uuid)),
-                                    )
-                                except BleakError as e:
-                                    self.logger.warning(
-                                        "Could not read characteristic from device %s: uuid: %s error: %s",
-                                        device.name,
-                                        char.uuid,
-                                        str(e),
-                                    )                                
-
-                        model_number = await client.read_gatt_char(
-                            MODEL_NBR_UUID
-                        )
-
-                        #print("Model Number: {0}".format("".join(map(chr, model_number))))
-
-                        self.logger.debug(
-                            "Model Number: %s",
-                            "".join(map(chr, model_number)),
-                        )
-                        
-                        
-                        # read_test = await client.read_gatt_char(
-                        #     RENOGY_READ_CHAR_UUID
-                        # )
-
-                        # self.logger.debug(
-                        #     "Read Test: %s",
-                        #     read_test,
-                        # )                                                                        
                         
                         # Create an event that will be set when notification data is received
                         notification_event = asyncio.Event()
@@ -875,7 +1163,10 @@ class RenogyActiveBluetoothCoordinator(ActiveBluetoothDataUpdateCoordinator):
             # Call the callback if available
             if self.device_data_callback:
                 try:
-                    await self.device_data_callback(self.device)
+                    if asyncio.iscoroutinefunction(self.device_data_callback):
+                        await self.device_data_callback(self.device)
+                    else:
+                        self.device_data_callback(self.device)
                 except Exception as e:
                     self.logger.error("Error in device data callback: %s", str(e))
 

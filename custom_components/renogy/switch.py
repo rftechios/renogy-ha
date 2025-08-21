@@ -65,32 +65,73 @@ class RenogyLoadSwitch(SwitchEntity):
             LOGGER.error("No device available for load control")
             return
             
+        # Store the current state before attempting to change it
+        old_state = self.is_on
+        LOGGER.debug("Load switch current state before command: %s", "ON" if old_state else "OFF")
+        
         success = await device.async_set_load(True)
         LOGGER.info("Load turn ON command result: %s", success)
         
         if success:
             # Give device time to process the command before refreshing
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(2.0)  # Increased wait time
             await self.coordinator.async_request_refresh()
+            
+            # Wait a bit for the refresh to complete
+            await asyncio.sleep(1.0)
+            
+            # Check if the state actually changed
+            new_state = self.is_on
+            LOGGER.debug("Load switch state after command and refresh: %s", "ON" if new_state else "OFF")
+            
+            if new_state and not old_state:
+                LOGGER.info("✓ Load successfully turned ON - state change confirmed")
+            elif new_state and old_state:
+                LOGGER.info("✓ Load was already ON - no state change needed")
+            else:
+                LOGGER.warning("✗ Load may not have turned ON - state did not change as expected")
+                LOGGER.warning("Device may not support load control or may require manual load connection")
+                
             self.async_write_ha_state()
         else:
             LOGGER.error("Failed to turn load ON for device %s", device.name)
 
     async def async_turn_off(self, **kwargs):
         """Turn the load OFF."""
-        LOGGER.info("User requested to turn load OFF for device %s", self.coordinator.device.name)
         device = self.coordinator.device
         if not device:
             LOGGER.error("No device available for load control")
             return
             
+        LOGGER.info("User requested to turn load OFF for device %s", device.name)
+        
+        # Store the current state before attempting to change it
+        old_state = self.is_on
+        LOGGER.debug("Load switch current state before command: %s", "ON" if old_state else "OFF")
+        
         success = await device.async_set_load(False)
         LOGGER.info("Load turn OFF command result: %s", success)
         
         if success:
             # Give device time to process the command before refreshing
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(2.0)  # Increased wait time
             await self.coordinator.async_request_refresh()
+            
+            # Wait a bit for the refresh to complete
+            await asyncio.sleep(1.0)
+            
+            # Check if the state actually changed
+            new_state = self.is_on
+            LOGGER.debug("Load switch state after command and refresh: %s", "ON" if new_state else "OFF")
+            
+            if not new_state and old_state:
+                LOGGER.info("✓ Load successfully turned OFF - state change confirmed")
+            elif not new_state and not old_state:
+                LOGGER.info("✓ Load was already OFF - no state change needed")
+            else:
+                LOGGER.warning("✗ Load may not have turned OFF - state did not change as expected")
+                LOGGER.warning("Device may not support load control or may require manual load disconnection")
+                
             self.async_write_ha_state()
         else:
             LOGGER.error("Failed to turn load OFF for device %s", device.name)

@@ -42,13 +42,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     # Create a coordinator for this entry
+    # Create a callback wrapper that schedules the async function
+    def device_update_callback(device):
+        hass.async_create_task(_handle_device_update(hass, entry, device))
+
     coordinator = RenogyActiveBluetoothCoordinator(
         hass=hass,
         logger=LOGGER,
         address=device_address,
         scan_interval=scan_interval,
         device_type=device_type,
-        device_data_callback=lambda device: _handle_device_update(hass, entry, device),
+        device_data_callback=device_update_callback,
     )
 
     # Store coordinator and devices in hass.data
