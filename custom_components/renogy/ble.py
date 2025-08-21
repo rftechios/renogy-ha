@@ -315,52 +315,23 @@ class RenogyBLEDevice:
             bool: True if successful, False otherwise.
         """
         
-        # Try multiple possible registers for load control
-        # Different Renogy models may use different registers
-        possible_registers = [
-            0x0002,  # Most common register for load control
-            0x0010,  # Alternative register some models use  
-            0x010A,  # Load control for some newer models
-            0x0005,  # Another possibility for some models
-            0x0100,  # Yet another alternative
-            0x0106,  # Load control register found in some documentation
-            0x0107,  # Sequential register after 0x0106
-            0x0108,  # Sequential register after 0x0107
-            0x0001,  # Simple register 1 - sometimes used for basic commands
-            0x0003,  # Register 3 
-            0x0004,  # Register 4
-            0x0103,  # Register near main range (256+3)
-            0x0104,  # Register near main range (256+4)  
-            0x0105,  # Register near main range (256+5)
-            0x0109,  # Register near main range (256+9)
-            0x010B,  # Register near main range (256+11)
-        ]
-        
+        # Use the confirmed working register for load control
+        register = 0x010A  # Verified working register for load control
         device_id = DEFAULT_DEVICE_ID
         function_code = 0x06
         value = 0x0001 if turn_on else 0x0000
         
         LOGGER.info("Setting load status to %s for device %s", "ON" if turn_on else "OFF", self.name)
         
-        # Try registers in order until one works
-        for i, register in enumerate(possible_registers):
-            LOGGER.info("Attempt %d/%d: Trying register 0x%04x for load control", 
-                       i + 1, len(possible_registers), register)
-            
-            success = await self._try_load_control_register(register, device_id, function_code, value, turn_on)
-            
-            if success:
-                LOGGER.info("✓ Load control successful using register 0x%04x", register)
-                return True
-            else:
-                LOGGER.warning("✗ Load control failed with register 0x%04x", register)
-                
-        # If none of the registers worked, provide detailed diagnostics
-        LOGGER.warning("All load control registers failed. Providing diagnostic information:")
-        await self._diagnose_load_control_issue(turn_on)
+        success = await self._try_load_control_register(register, device_id, function_code, value, turn_on)
         
-        # Return True anyway since the command was sent (device may not support load control)
-        return True
+        if success:
+            LOGGER.info("✓ Load control successful using register 0x%04x", register)
+            return True
+        else:
+            LOGGER.warning("✗ Load control failed with register 0x%04x", register)
+            await self._diagnose_load_control_issue(turn_on)
+            return False
 
     async def _diagnose_load_control_issue(self, turn_on: bool) -> None:
         """
@@ -484,12 +455,12 @@ class RenogyBLEDevice:
 
     async def _try_load_control_register(self, register: int, device_id: int, function_code: int, value: int, turn_on: bool) -> bool:
         """
-        Try to control the load using a specific register.
+        Try to control the load using the confirmed working register 0x010A.
         
         Args:
-            register: Modbus register to write to
+            register: Modbus register to write to (should be 0x010A)
             device_id: Device ID for Modbus
-            function_code: Modbus function code (usually 0x06 for write single register)
+            function_code: Modbus function code (0x06 for write single register)
             value: Value to write (0x0001 for ON, 0x0000 for OFF)
             turn_on: Whether we're trying to turn the load on (for logging)
             
@@ -497,24 +468,9 @@ class RenogyBLEDevice:
             bool: True if the command was successful and verified
         """
         
-        # Try different value patterns - some devices might expect different values
-        value_patterns = [
-            (0x0001 if turn_on else 0x0000, "standard pattern"),  # Standard ON/OFF
-            (0x00FF if turn_on else 0x0000, "0xFF pattern"),     # Some devices use 0xFF for ON
-            (0x0100 if turn_on else 0x0000, "0x0100 pattern"),   # Alternative pattern
-        ]
+        LOGGER.debug("Using confirmed working register 0x%04x with standard pattern (value=0x%04x)", register, value)
         
-        for val, pattern_name in value_patterns:
-            LOGGER.debug("Trying register 0x%04x with %s (value=0x%04x)", register, pattern_name, val)
-            
-            success = await self._try_single_load_command(register, device_id, function_code, val, turn_on, pattern_name)
-            if success:
-                LOGGER.info("✓ Load control successful with register 0x%04x using %s", register, pattern_name)
-                return True
-            else:
-                LOGGER.debug("✗ Register 0x%04x failed with %s", register, pattern_name)
-                
-        return False
+        return await self._try_single_load_command(register, device_id, function_code, value, turn_on, "standard pattern")
         
     async def _try_single_load_command(self, register: int, device_id: int, function_code: int, value: int, turn_on: bool, pattern_name: str) -> bool:
         """
@@ -594,16 +550,6 @@ class RenogyBLEDevice:
             return False
         except Exception as e:
             LOGGER.debug("Error during load control: %s", str(e))
-            return False
-            
-        except BleakError as e:
-            LOGGER.error("BLE error while setting load status for %s: %s", self.name, str(e))
-            self.update_availability(False, e)
-            return False
-        except Exception as e:
-            LOGGER.error("Unexpected error while setting load status for %s: %s", self.name, str(e))
-            LOGGER.debug("Exception details: %s", traceback.format_exc())
-            self.update_availability(False, e)
             return False
 
     async def _verify_load_status_with_handler(self, client, expected_on: bool, notification_handler, notification_event, response_data: bytearray) -> bool:
